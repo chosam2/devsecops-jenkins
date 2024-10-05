@@ -1,0 +1,60 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  containers:
+                  - name: podman
+                    image: quay.io/podman/stable
+                    command:
+                    - cat
+                    tty: true
+                    securityContext:
+                      privileged: true
+                    env:
+                    - name: PODMAN_IGNORE_CGROUPSV1_WARNING
+                      value: "1"
+            '''
+        }
+    }
+    stages {
+        stage('Run Nginx with Podman') {
+            steps {
+                container('podman') {
+                    sh '''
+                        # Pull the image explicitly
+                        podman pull docker.io/library/nginx:latest
+                        
+                        # Run Nginx
+                        podman run -d --name nginx-test -p 8080:80 docker.io/library/nginx:latest
+                        
+                        # Wait for the container to be ready
+                        for i in {1..30}; do
+                            if podman exec nginx-test curl -f http://localhost:80 &>/dev/null; then
+                                echo "Nginx is up and running"
+                                break
+                            fi
+                            echo "Waiting for Nginx to start..."
+                            sleep 2
+                        done
+                        
+                        # Test Nginx
+                        podman exec nginx-test curl -I http://localhost:80
+                    '''
+                }
+            }
+        }
+    }
+    post {
+        always {
+            container('podman') {
+                sh '''
+                    podman stop nginx-test || true
+                    podman rm nginx-test || true
+                '''
+            }
+        }
+    }
+}

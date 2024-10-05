@@ -1,0 +1,89 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  volumes:
+                  - name: shared-workspace
+                    emptyDir: {}
+                  - name: jenkins-docker-cfg
+                    projected:
+                      sources:
+                      - secret:
+                          name: docker-credentials
+                          items:
+                            - key: .dockerconfigjson
+                              path: config.json
+                  containers:
+                  - name: maven
+                    image: maven:3.8-openjdk-17
+                    command:
+                    - cat
+                    tty: true
+                    volumeMounts:
+                    - name: shared-workspace
+                      mountPath: /workspace
+                  - name: kaniko
+                    image: gcr.io/kaniko-project/executor:debug
+                    command:
+                    - /busybox/cat
+                    tty: true
+                    volumeMounts:
+                    - name: shared-workspace
+                      mountPath: /workspace
+                    - name: jenkins-docker-cfg
+                      mountPath: /kaniko/.docker
+            '''
+        }
+    }
+    environment {
+        HARBOR_REGISTRY = "harbor.cccr-opensource.com"
+        IMAGE_REPO = "jenkins-project/petclinic"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/cccr-pass1/Petclinic.git'
+            }
+        }
+        stage('Build with Maven') {
+            steps {
+                container('maven') {
+                    sh '''
+                    mvn clean package -DskipTests
+                    mkdir -p /workspace/target
+                    cp target/*.war /workspace/target/
+                    cp Dockerfile /workspace/
+                    '''
+                }
+            }
+        }
+        stage('Debug Info') {
+            steps {
+                container('kaniko') {
+                    sh '''
+                    ls -la /workspace
+                    cat /workspace/Dockerfile
+                    '''
+                }
+            }
+        }
+        stage('Build and Push Docker Image') {
+            steps {
+                container('kaniko') {
+                    sh '''
+                    /kaniko/executor \
+                    --context /workspace \
+                    --destination ${HARBOR_REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG} \
+                    --destination ${HARBOR_REGISTRY}/${IMAGE_REPO}:latest \
+                    --dockerfile /workspace/Dockerfile \
+                    --verbosity debug
+                    '''
+                }
+            }
+        }
+    }
+}

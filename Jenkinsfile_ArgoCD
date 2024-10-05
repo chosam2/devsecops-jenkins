@@ -1,0 +1,155 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: aws-kubectl
+    image: atlastechnologiesteam/aws-cli-kubectl-base:aws-cli-2.13.5-r0-kubectl-1.27.0
+    command:
+    - /bin/sh
+    args:
+    - -c
+    - cat
+    tty: true
+'''
+        }
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-northeast-1'
+        EKS_CLUSTER_NAME = 'dev-eks-ap-northeast-1'
+        KUBECONFIG = '/tmp/kubeconfig'
+        DOCKER_IMAGE = 'nuitciel/petclinic:latest'
+        GIT_REPO_URL = 'https://github.com/cccr-pass1/Petclinic.git'
+        ARGOCD_SERVER = 'argocd.cccr-opensource.com'
+        K8S_NAMESPACE = 'cccr-project'
+        ARGOCD_APP_NAME = 'cccr-pass1'
+        GIT_USER_EMAIL = 'gongdae1359@gmail.com'
+        GIT_USER_NAME = 'gongd135'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git url: "${GIT_REPO_URL}", branch: 'main', credentialsId: 'github-creds'
+            }
+        }
+
+        stage('Update kubeconfig and Verify Connection') {
+            steps {
+                container('aws-kubectl') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                        sh """
+                        aws --version
+                        kubectl version --client
+                        aws eks --region ${AWS_DEFAULT_REGION} update-kubeconfig --name ${EKS_CLUSTER_NAME} --kubeconfig ${KUBECONFIG}
+                        kubectl --kubeconfig=${KUBECONFIG} get nodes
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Verify k8s/deployment.yaml') {
+            steps {
+                sh '''
+                echo "Checking if k8s/deployment.yaml exists..."
+                if [ ! -f k8s/deployment.yaml ]; then
+                    echo "Error: k8s/deployment.yaml not found!"
+                    exit 1
+                fi
+                '''
+            }
+        }
+
+        stage('Update Kubernetes Manifests') {
+            steps {
+                withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_TOKEN')]) {
+                    sh """
+                    # 이미지 업데이트
+                    sed -i 's#image:.*#image: ${DOCKER_IMAGE}#g' k8s/deployment.yaml
+                    
+                    # Git 설정
+                    git config user.email "${GIT_USER_EMAIL}"
+                    git config user.name "${GIT_USER_NAME}"
+                    git add k8s/deployment.yaml
+                    
+                    # 변경 사항이 있는지 확인
+                    if ! git diff --cached --quiet; then
+                        git commit -m "Update image to ${DOCKER_IMAGE}"
+                        
+                        # 원격 저장소 URL 설정 (토큰을 사용하여 인증)
+                        git remote set-url origin https://${GIT_USER_NAME}:${GITHUB_TOKEN}@github.com/cccr-pass1/Petclinic.git
+                        
+                        # 변경 사항 푸시
+                        git push origin main
+                    else
+                        echo "커밋할 변경 사항이 없습니다."
+                    fi
+                    """
+                }
+            }
+        }
+
+        stage('Deploy with ArgoCD') {
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'argocd-creds', usernameVariable: 'ARGOCD_USER', passwordVariable: 'ARGOCD_PASS'),
+                    usernamePassword(credentialsId: 'github-repo-creds', usernameVariable: 'GITHUB_REPO_USER', passwordVariable: 'GITHUB_REPO_PASS')
+                ]) {
+                    sh """
+                    set -e  # 오류 발생 시 스크립트 중단
+
+                    # ArgoCD CLI 다운로드 및 설치 (현재 디렉토리에 설치)
+                    curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+                    chmod +x argocd
+
+                    # ArgoCD 로그인
+                    ./argocd login ${ARGOCD_SERVER} --username $ARGOCD_USER --password $ARGOCD_PASS --insecure
+
+                    # GitHub Repository 추가
+                    ./argocd repo add https://github.com/cccr-pass1/Petclinic.git --username $GITHUB_REPO_USER --password $GITHUB_REPO_PASS
+
+                    # 애플리케이션 존재 여부 확인
+                    if ! ./argocd app get ${ARGOCD_APP_NAME} > /dev/null 2>&1; then
+                        echo "Application '${ARGOCD_APP_NAME}' not found. Creating application..."
+                        ./argocd app create ${ARGOCD_APP_NAME} \
+                            --repo ${GIT_REPO_URL} \
+                            --path k8s \
+                            --dest-server https://kubernetes.default.svc \
+                            --dest-namespace ${K8S_NAMESPACE} \
+                            --sync-policy automated \
+                            --self-heal \
+                            --auto-prune
+                    else
+                        echo "Application '${ARGOCD_APP_NAME}' already exists."
+                    fi
+
+                    # 애플리케이션 동기화
+                    ./argocd app sync ${ARGOCD_APP_NAME} --grpc-web
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            slackSend (
+                channel: '#backend',
+                message: "🎉 파이프라인이 성공적으로 완료되었습니다! 🚀 \n이미 배포된 이미지: ${DOCKER_IMAGE}",
+                color: 'good'
+            )
+        }
+        failure {
+            slackSend (
+                channel: '#backend',
+                message: "❗ 파이프라인이 실패했습니다. 😢 \n확인해주세요.",
+                color: 'danger'
+            )
+        }
+    }
+}

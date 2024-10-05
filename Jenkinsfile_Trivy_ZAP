@@ -1,0 +1,104 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  containers:
+                  - name: trivy
+                    image: aquasec/trivy:latest
+                    command:
+                    - cat
+                    tty: true
+                  - name: zap
+                    image: ghcr.io/zaproxy/zaproxy:stable
+                    command:
+                    - cat
+                    tty: true
+                    volumeMounts:
+                    - name: zap-workspace
+                      mountPath: /zap/wrk
+                  volumes:
+                  - name: zap-workspace
+                    emptyDir: {}
+            '''
+        }
+    }
+    
+    environment {
+        SONAR_PROJECT_KEY = "juiceshop-${JOB_NAME}-${BUILD_NUMBER}"
+        JUICE_SHOP_IMAGE = "bkimminich/juice-shop"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'master', url: 'https://github.com/juice-shop/juice-shop.git'
+            }
+        }
+        // stage('Trivy Image Scan') {
+        //     steps {
+        //         container('trivy') {
+        //             sh """
+        //                 apk add curl
+        //                 curl -L -o html.tpl https://raw.githubusercontent.com/aquasecurity/trivy/cb0b3a9279b31810ecd686a385e5140e567ce86f/contrib/html.tpl
+        //                 ls -l
+        //                 trivy image --format template --template '@html.tpl' -o trivy-report.html ${JUICE_SHOP_IMAGE}
+        //                 trivy image --format json -o trivy-report.json ${JUICE_SHOP_IMAGE}
+        //             """
+        //         }
+        //     }
+        //     post {
+        //         always {
+        //             publishHTML(target: [
+        //                 allowMissing: false,
+        //                 alwaysLinkToLastBuild: false,
+        //                 keepAll: true,
+        //                 reportDir: '.',
+        //                 reportFiles: 'trivy-report.html',
+        //                 reportName: 'Trivy Scan Report'
+        //             ])
+        //             archiveArtifacts 'trivy-report.json'
+        //         }
+        //     }
+        // }
+
+        stage('DAST with OWASP ZAP') {
+            steps {
+                container('zap') {
+                    sh """
+                        pwd
+                        ls
+                        zap-full-scan.py -t http://demo.owasp-juice.shop -g gen.conf -r zap-report.html
+                        """
+                }
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: false,
+                        keepAll: true,
+                        reportDir: '.',
+                        reportFiles: 'zap-report.html',
+                        reportName: 'ZAP Scan Report'
+                    ])
+                    // archiveArtifacts 'zap-report.html'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Archiving reports and logs...'
+        }
+        success {
+            echo 'Pipeline succeeded!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}

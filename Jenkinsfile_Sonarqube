@@ -1,0 +1,61 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  volumes:
+                  - name: shared-workspace
+                    emptyDir: {}
+                  containers:
+                  - name: sonar-scanner
+                    image: sonarsource/sonar-scanner-cli:latest
+                    command:
+                    - cat
+                    tty: true
+                    volumeMounts:
+                    - name: shared-workspace
+                      mountPath: /workspace
+            '''
+        }
+    }
+
+    environment {
+        SONAR_PROJECT_KEY = "juiceshop-${JOB_NAME}-${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'master', url: 'https://github.com/yuran777/juice-shop.git'
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                container('sonar-scanner') {
+                    withSonarQubeEnv('sonar-server') {
+                        sh """
+                        sonar-scanner \
+                          -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                          -Dsonar.projectName='Juice Shop ${JOB_NAME} ${BUILD_NUMBER}' \
+                          -Dsonar.sources=. \
+                          -Dsonar.exclusions=node_modules/,test/,coverage/** \
+                          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo 'Pipeline succeeded!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+            // 추가 작업 예: notifySlack('Pipeline failed!')
+        }
+    }
+}

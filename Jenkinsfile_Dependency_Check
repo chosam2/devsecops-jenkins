@@ -1,0 +1,91 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  containers:
+                  - name: jnlp
+                    image: jenkins/inbound-agent:latest
+                  - name: nodejs
+                    image: node:18
+                    command:
+                    - cat
+                    tty: true
+            '''
+            defaultContainer 'jnlp'
+        }
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'master', url: 'https://github.com/yuran777/juice-shop.git'
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                container('nodejs') {
+                    script {
+                        sh 'npm install --legacy-peer-deps'
+                    }
+                }
+            }
+        }
+        // stage('Build') {
+        //     steps {
+        //         container('nodejs') {
+        //             script {
+        //                 sh 'npm run build:frontend'
+        //                 sh 'npm run build:server'
+        //             }
+        //         }
+        //     }
+        // }
+        stage('OWASP Dependency Check') {
+            steps {
+                script {
+                    sh 'pwd'
+                    sh 'ls -la'
+                    sh 'java -version'
+
+                    if (!fileExists('package.json')) {
+                        error "package.json file not found. Are you in the correct directory?"
+                    }
+                    echo "Source code verified. Proceeding with Dependency Check."
+                }
+                
+                withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                    dependencyCheck additionalArguments: """
+                        --scan ./ 
+                        --format "ALL" 
+                        --prettyPrint
+                        --nvdApiKey ${NVD_API_KEY}
+                        --project "Juice Shop ${JOB_NAME} ${BUILD_NUMBER}"
+                        --out ./dependency-check-report
+                    """, odcInstallation: 'DP-Check'
+                }
+                
+                sh 'ls -R ./dependency-check-report'
+            }
+            post {
+                always {
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            archiveArtifacts artifacts: 'dependency-check-report/**/*', allowEmptyArchive: true
+        }
+        success {
+            echo 'Pipeline succeeded!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}
